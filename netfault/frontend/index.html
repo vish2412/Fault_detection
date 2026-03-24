@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetFault — AI Fault Detection</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:        #060810;
+  --bg2:       #0b0f1a;
+  --bg3:       #0f1525;
+  --panel:     #111827;
+  --border:    #1e2d45;
+  --border2:   #2a3f5f;
+  --accent:    #00d4ff;
+  --accent2:   #0088cc;
+  --green:     #00ff88;
+  --green2:    #00cc66;
+  --amber:     #ffb700;
+  --red:       #ff3366;
+  --red2:      #cc1144;
+  --purple:    #9b59ff;
+  --text:      #e2e8f0;
+  --text2:     #94a3b8;
+  --text3:     #4a5568;
+  --mono:      'Share Tech Mono', monospace;
+  --head:      'Rajdhani', sans-serif;
+  --code:      'Space Mono', monospace;
+  --glow-c:    0 0 20px rgba(0,212,255,0.3);
+  --glow-g:    0 0 20px rgba(0,255,136,0.3);
+  --glow-r:    0 0 20px rgba(255,51,102,0.4);
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 14px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--head);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Scanline overlay ── */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+  pointer-events: none; z-index: 9999;
+}
+
+/* ── Grid pattern bg ── */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background-image:
+    linear-gradient(rgba(0,212,255,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,255,0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+  pointer-events: none; z-index: 0;
+}
+
+/* ── Header ── */
+#header {
+  position: relative; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 28px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  display: flex; align-items: center; gap: 14px;
+}
+.logo-icon {
+  width: 36px; height: 36px;
+  border: 1.5px solid var(--accent);
+  border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: var(--glow-c);
+  animation: pulse-border 2s ease-in-out infinite;
+}
+@keyframes pulse-border {
+  0%,100% { box-shadow: 0 0 8px rgba(0,212,255,0.3); }
+  50%      { box-shadow: 0 0 24px rgba(0,212,255,0.7); }
+}
+.logo-icon svg { width: 20px; height: 20px; }
+.logo-text { font-family: var(--head); font-size: 22px; font-weight: 700; letter-spacing: 4px; color: var(--accent); }
+.logo-sub  { font-family: var(--mono); font-size: 10px; color: var(--text3); letter-spacing: 2px; text-transform: uppercase; margin-top: 1px; }
+
+.header-center {
+  font-family: var(--mono); font-size: 11px; color: var(--text3);
+  display: flex; gap: 28px;
+}
+.hstat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.hstat-val { font-size: 16px; font-weight: 700; font-family: var(--head); }
+.hstat-val.green { color: var(--green); }
+.hstat-val.amber { color: var(--amber); }
+.hstat-val.red   { color: var(--red); }
+.hstat-lbl { font-size: 9px; letter-spacing: 1.5px; color: var(--text3); }
+
+.header-right {
+  display: flex; align-items: center; gap: 16px;
+}
+.ws-indicator {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 10px; color: var(--text3);
+}
+.ws-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--text3);
+  transition: background 0.3s;
+}
+.ws-dot.connected { background: var(--green); box-shadow: var(--glow-g); animation: blink 2s ease-in-out infinite; }
+.ws-dot.error     { background: var(--red); }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+#clock {
+  font-family: var(--mono); font-size: 13px; color: var(--accent); letter-spacing: 2px;
+}
+
+/* ── Layout ── */
+#main {
+  position: relative; z-index: 1;
+  display: grid;
+  grid-template-columns: 320px 1fr 300px;
+  grid-template-rows: auto 1fr;
+  gap: 1px;
+  height: calc(100vh - 62px);
+  background: var(--border);
+}
+
+/* ── Panel base ── */
+.panel {
+  background: var(--panel);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.panel-title {
+  font-family: var(--head); font-size: 11px; font-weight: 600;
+  letter-spacing: 3px; text-transform: uppercase;
+  color: var(--accent); display: flex; align-items: center; gap: 8px;
+}
+.panel-title::before {
+  content: ''; display: block;
+  width: 3px; height: 12px;
+  background: var(--accent);
+  box-shadow: var(--glow-c);
+}
+.panel-body { flex: 1; overflow-y: auto; padding: 12px; }
+.panel-body::-webkit-scrollbar { width: 3px; }
+.panel-body::-webkit-scrollbar-track { background: var(--bg2); }
+.panel-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+/* ── Node Grid (left panel) ── */
+#panel-nodes {
+  grid-column: 1;
+  grid-row: 1 / 3;
+}
+
+.node-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  transition: all 0.3s ease;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.node-card::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 3px;
+  background: var(--green);
+  transition: all 0.3s;
+}
+.node-card.warning::before  { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.node-card.critical::before { background: var(--red);   box-shadow: 0 0 12px var(--red); }
+.node-card.offline::before  { background: var(--text3); }
+.node-card.selected { border-color: var(--accent); box-shadow: var(--glow-c); }
+
+.node-card:hover { border-color: var(--border2); transform: translateX(2px); }
+
+.node-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.node-id { font-family: var(--code); font-size: 13px; font-weight: 700; color: var(--text); }
+.node-status-badge {
+  font-family: var(--mono); font-size: 9px; font-weight: 700;
+  padding: 2px 8px; border-radius: 2px; letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+.badge-healthy  { background: rgba(0,255,136,0.12); color: var(--green);  border: 1px solid rgba(0,255,136,0.3); }
+.badge-warning  { background: rgba(255,183,0,0.12);  color: var(--amber);  border: 1px solid rgba(255,183,0,0.3); }
+.badge-critical { background: rgba(255,51,102,0.12); color: var(--red);    border: 1px solid rgba(255,51,102,0.3); animation: flicker 0.5s ease-in-out infinite; }
+.badge-offline  { background: rgba(74,85,104,0.3);   color: var(--text3);  border: 1px solid var(--text3); }
+@keyframes flicker { 0%,100%{opacity:1} 50%{opacity:0.6} }
+
+.node-meta { font-family: var(--mono); font-size: 9px; color: var(--text3); margin-bottom: 8px; }
+
+.node-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.nm {
+  background: var(--bg3); padding: 5px 7px; border-radius: 4px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.nm-lbl { font-family: var(--mono); font-size: 8px; color: var(--text3); letter-spacing: 1px; }
+.nm-val { font-family: var(--code); font-size: 12px; font-weight: 700; color: var(--text); }
+.nm-val.danger { color: var(--red); }
+.nm-val.warn   { color: var(--amber); }
+.nm-val.good   { color: var(--green); }
+
+.node-fault-tag {
+  margin-top: 7px;
+  font-family: var(--mono); font-size: 9px;
+  color: var(--red); letter-spacing: 1px;
+  display: flex; align-items: center; gap: 5px;
+}
+.node-fault-tag::before { content: '⚠'; font-size: 10px; }
+
+/* ── Center top: topology map ── */
+#panel-topology {
+  grid-column: 2;
+  grid-row: 1;
+  height: 280px;
+  min-height: 280px;
+}
+#topology-canvas { width: 100%; height: 100%; }
+
+/* ── Center bottom: charts ── */
+#panel-charts {
+  grid-column: 2;
+  grid-row: 2;
+  overflow: hidden;
+}
+.chart-tabs {
+  display: flex; gap: 1px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.chart-tab {
+  padding: 7px 16px;
+  font-family: var(--head); font-size: 11px; font-weight: 600;
+  letter-spacing: 2px; text-transform: uppercase;
+  background: var(--bg3); color: var(--text3);
+  cursor: pointer; transition: all 0.2s; border: none;
+  flex: 1; text-align: center;
+}
+.chart-tab.active { background: var(--panel); color: var(--accent); border-bottom: 2px solid var(--accent); }
+.chart-tab:hover:not(.active) { color: var(--text2); background: var(--bg2); }
+.chart-area { flex: 1; padding: 12px; overflow: hidden; position: relative; }
+.chart-wrap { position: relative; height: 100%; display: none; }
+.chart-wrap.active { display: block; }
+
+/* ── Right: fault log ── */
+#panel-faults {
+  grid-column: 3;
+  grid-row: 1 / 3;
+}
+
+/* ── Fault Injection Panel ── */
+#panel-inject {
+  position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: 700px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  z-index: 100;
+  transition: transform 0.4s ease;
+}
+#panel-inject.hidden { transform: translateX(-50%) translateY(calc(100% - 42px)); }
+.inject-handle {
+  padding: 10px 20px;
+  display: flex; align-items: center; justify-content: space-between;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+.inject-title {
+  font-family: var(--head); font-size: 11px; font-weight: 700;
+  letter-spacing: 3px; color: var(--amber); text-transform: uppercase;
+}
+.inject-toggle {
+  font-family: var(--mono); font-size: 10px; color: var(--text3); letter-spacing: 1px;
+}
+.inject-body { padding: 16px 20px; }
+.inject-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 8px; margin-bottom: 12px; }
+.inject-node-sel {
+  font-family: var(--mono); font-size: 10px; color: var(--text2);
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 8px; cursor: pointer; text-align: center; letter-spacing: 1px;
+  transition: all 0.2s;
+}
+.inject-node-sel.active { border-color: var(--amber); color: var(--amber); background: rgba(255,183,0,0.08); }
+.inject-node-sel:hover  { border-color: var(--border2); color: var(--text); }
+
+.fault-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.fault-btn {
+  font-family: var(--head); font-size: 11px; font-weight: 600;
+  letter-spacing: 2px; text-transform: uppercase;
+  padding: 7px 14px; border-radius: 4px; cursor: pointer;
+  border: 1px solid; transition: all 0.2s;
+  background: transparent;
+}
+.fault-btn:hover { transform: translateY(-1px); }
+.fault-btn.fl   { color: var(--amber); border-color: rgba(255,183,0,0.4); }
+.fault-btn.fl:hover   { background: rgba(255,183,0,0.12); box-shadow: 0 0 12px rgba(255,183,0,0.3); }
+.fault-btn.fr   { color: var(--red);   border-color: rgba(255,51,102,0.4); }
+.fault-btn.fr:hover   { background: rgba(255,51,102,0.12); box-shadow: 0 0 12px rgba(255,51,102,0.3); }
+.fault-btn.fc   { color: var(--green); border-color: rgba(0,255,136,0.4); }
+.fault-btn.fc:hover   { background: rgba(0,255,136,0.12); box-shadow: 0 0 12px rgba(0,255,136,0.3); }
+
+/* ── Fault Log entries ── */
+.fault-entry {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-family: var(--mono);
+  animation: slide-in 0.3s ease-out;
+}
+@keyframes slide-in { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; } }
+.fe-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.fe-node { font-size: 11px; font-weight: 700; color: var(--text); font-family: var(--code); }
+.fe-time { font-size: 9px; color: var(--text3); }
+.fe-type { font-size: 10px; color: var(--red); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 4px; }
+.fe-conf { display: flex; gap: 6px; align-items: center; }
+.conf-bar {
+  flex: 1; height: 3px; background: var(--bg3); border-radius: 2px; overflow: hidden;
+}
+.conf-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
+.fe-score { font-size: 9px; color: var(--text3); }
+
+/* ── Model stats bar ── */
+#model-bar {
+  position: relative; z-index: 10;
+  display: flex; align-items: center; gap: 24px;
+  padding: 7px 28px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono); font-size: 10px; color: var(--text3);
+  flex-shrink: 0;
+}
+.mbar-stat { display: flex; align-items: center; gap: 7px; }
+.mbar-lbl { letter-spacing: 1px; }
+.mbar-val { color: var(--accent); font-weight: 700; }
+.mbar-sep { width: 1px; height: 14px; background: var(--border); }
+.model-ready-badge {
+  margin-left: auto;
+  font-family: var(--head); font-size: 10px; font-weight: 700;
+  letter-spacing: 2px; padding: 3px 10px; border-radius: 2px;
+}
+.model-ready-badge.ready   { background: rgba(0,255,136,0.12); color: var(--green); border: 1px solid rgba(0,255,136,0.3); }
+.model-ready-badge.loading { background: rgba(255,183,0,0.12);  color: var(--amber);  border: 1px solid rgba(255,183,0,0.3); animation: pulse-loading 1s ease-in-out infinite; }
+@keyframes pulse-loading { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+/* ── Toast notifications ── */
+#toast-container {
+  position: fixed; top: 80px; right: 20px; z-index: 9000;
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+}
+.toast {
+  font-family: var(--mono); font-size: 11px;
+  padding: 10px 16px; border-radius: 4px;
+  border: 1px solid;
+  animation: toast-in 0.3s ease, toast-out 0.3s ease 2.7s forwards;
+  min-width: 240px;
+  pointer-events: all;
+}
+.toast.fault   { background: rgba(255,51,102,0.15); color: var(--red);   border-color: rgba(255,51,102,0.4); }
+.toast.clear   { background: rgba(0,255,136,0.12);  color: var(--green); border-color: rgba(0,255,136,0.3); }
+.toast.info    { background: rgba(0,212,255,0.12);  color: var(--accent);border-color: rgba(0,212,255,0.3); }
+@keyframes toast-in  { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
+@keyframes toast-out { from { opacity:1; } to { opacity:0; } }
+
+/* ── Topology tooltips ── */
+#topo-tooltip {
+  position: fixed; z-index: 500;
+  background: var(--panel); border: 1px solid var(--border2);
+  border-radius: 6px; padding: 8px 12px;
+  font-family: var(--mono); font-size: 10px; color: var(--text2);
+  pointer-events: none; display: none;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+}
+
+/* ── No-data placeholder ── */
+.no-data {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; font-family: var(--mono); font-size: 11px; color: var(--text3);
+  letter-spacing: 2px; flex-direction: column; gap: 8px;
+}
+
+/* ── Responsive scroll for node panel ── */
+#panel-nodes .panel-body { overflow-y: auto; }
+
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="10" cy="10" r="3" stroke="#00d4ff" stroke-width="1.5"/>
+        <path d="M10 1v4M10 15v4M1 10h4M15 10h4" stroke="#00d4ff" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M3.5 3.5l2.8 2.8M13.7 13.7l2.8 2.8M3.5 16.5l2.8-2.8M13.7 6.3l2.8-2.8" stroke="#00d4ff" stroke-width="1" stroke-linecap="round" opacity=".5"/>
+      </svg>
+    </div>
+    <div>
+      <div class="logo-text">NETFAULT</div>
+      <div class="logo-sub">AI-Based Fault Detection System</div>
+    </div>
+  </div>
+
+  <div class="header-center">
+    <div class="hstat">
+      <div class="hstat-val green" id="h-healthy">6</div>
+      <div class="hstat-lbl">Healthy</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val amber" id="h-warning">0</div>
+      <div class="hstat-lbl">Warning</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val red" id="h-critical">0</div>
+      <div class="hstat-lbl">Critical</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val" id="h-total" style="color:var(--accent)">0</div>
+      <div class="hstat-lbl">Faults Det.</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val" id="h-packets" style="color:var(--text2)">0</div>
+      <div class="hstat-lbl">Pkts/Total</div>
+    </div>
+  </div>
+
+  <div class="header-right">
+    <div class="ws-indicator">
+      <div class="ws-dot" id="ws-dot"></div>
+      <span id="ws-status">CONNECTING</span>
+    </div>
+    <div id="clock">--:--:--</div>
+  </div>
+</div>
+
+<!-- Model Status Bar -->
+<div id="model-bar">
+  <div class="mbar-stat"><span class="mbar-lbl">ALGORITHM</span><span class="mbar-val">ISOLATION FOREST</span></div>
+  <div class="mbar-sep"></div>
+  <div class="mbar-stat"><span class="mbar-lbl">FEATURES</span><span class="mbar-val">8</span></div>
+  <div class="mbar-sep"></div>
+  <div class="mbar-stat"><span class="mbar-lbl">ACCURACY</span><span class="mbar-val" id="m-acc">—</span></div>
+  <div class="mbar-sep"></div>
+  <div class="mbar-stat"><span class="mbar-lbl">ESTIMATORS</span><span class="mbar-val">150</span></div>
+  <div class="mbar-sep"></div>
+  <div class="mbar-stat"><span class="mbar-lbl">CONTAMINATION</span><span class="mbar-val">5%</span></div>
+  <div class="mbar-sep"></div>
+  <div class="mbar-stat"><span class="mbar-lbl">NODES MONITORED</span><span class="mbar-val">6</span></div>
+  <div class="mbar-sep"></div>
+  <div class="mbar-stat"><span class="mbar-lbl">UPTIME</span><span class="mbar-val" id="m-uptime">0s</span></div>
+  <span class="model-ready-badge loading" id="model-badge">TRAINING</span>
+</div>
+
+<!-- Main layout -->
+<div id="main">
+
+  <!-- Left: Node cards -->
+  <div class="panel" id="panel-nodes">
+    <div class="panel-header">
+      <div class="panel-title">Network Nodes</div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="node-count">6 / 6 ONLINE</div>
+    </div>
+    <div class="panel-body" id="nodes-container">
+      <div class="no-data"><span>CONNECTING...</span></div>
+    </div>
+  </div>
+
+  <!-- Center top: topology -->
+  <div class="panel" id="panel-topology">
+    <div class="panel-header">
+      <div class="panel-title">Network Topology</div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text3)">LIVE MESH · REAL-TIME</div>
+    </div>
+    <canvas id="topology-canvas"></canvas>
+  </div>
+
+  <!-- Center bottom: charts -->
+  <div class="panel" id="panel-charts" style="display:flex;flex-direction:column;">
+    <div class="chart-tabs">
+      <button class="chart-tab active" onclick="switchTab('rtt')">RTT / Latency</button>
+      <button class="chart-tab" onclick="switchTab('loss')">Packet Loss</button>
+      <button class="chart-tab" onclick="switchTab('cpu')">CPU / Memory</button>
+      <button class="chart-tab" onclick="switchTab('score')">Anomaly Score</button>
+    </div>
+    <div class="chart-area">
+      <div class="chart-wrap active" id="tab-rtt"><canvas id="chart-rtt"></canvas></div>
+      <div class="chart-wrap" id="tab-loss"><canvas id="chart-loss"></canvas></div>
+      <div class="chart-wrap" id="tab-cpu"><canvas id="chart-cpu"></canvas></div>
+      <div class="chart-wrap" id="tab-score"><canvas id="chart-score"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Right: fault log -->
+  <div class="panel" id="panel-faults">
+    <div class="panel-header">
+      <div class="panel-title">Fault Event Log</div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="fault-count">0 EVENTS</div>
+    </div>
+    <div class="panel-body" id="fault-log-container">
+      <div class="no-data" id="no-faults">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="var(--text3)" stroke-width="1.5"/><path d="M12 7v5M12 16v1" stroke="var(--text3)" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>NO FAULTS DETECTED</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Fault Injection Drawer -->
+<div id="panel-inject" class="hidden">
+  <div class="inject-handle" onclick="toggleInject()">
+    <div class="inject-title">⚡ Fault Injection Console</div>
+    <div class="inject-toggle" id="inject-toggle-lbl">▲ EXPAND</div>
+  </div>
+  <div class="inject-body">
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:8px;letter-spacing:1px;">SELECT TARGET NODE</div>
+    <div class="inject-grid" id="inject-nodes-grid"></div>
+    <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:8px;letter-spacing:1px;">INJECT FAULT TYPE</div>
+    <div class="fault-buttons">
+      <button class="fault-btn fl" onclick="injectFault('packet_loss')">Packet Loss</button>
+      <button class="fault-btn fl" onclick="injectFault('high_latency')">High Latency</button>
+      <button class="fault-btn fr" onclick="injectFault('cpu_exhaustion')">CPU Exhaust</button>
+      <button class="fault-btn fr" onclick="injectFault('memory_leak')">Memory Leak</button>
+      <button class="fault-btn fr" onclick="injectFault('network_partition')">Net Partition</button>
+      <button class="fault-btn fr" onclick="injectFault('bandwidth_saturation')">Bandwidth Sat.</button>
+      <button class="fault-btn fr" onclick="injectFault('crash')">Node Crash</button>
+      <button class="fault-btn fc" onclick="injectFault('clear')">Clear Fault</button>
+      <button class="fault-btn" style="color:var(--red);border-color:rgba(255,51,102,0.4);margin-left:auto" onclick="injectAll('crash')">Crash ALL</button>
+      <button class="fault-btn" style="color:var(--green);border-color:rgba(0,255,136,0.3)" onclick="clearAll()">Clear ALL</button>
+    </div>
+  </div>
+</div>
+
+<!-- Topology tooltip -->
+<div id="topo-tooltip"></div>
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════════
+let ws = null;
+let latestData = {};
+let faultHistory = [];
+let selectedNode = 'NODE-A';
+let injectTarget = 'NODE-A';
+let injectOpen = false;
+let charts = {};
+let chartData = { rtt:{}, loss:{}, cpu:{}, score:{} };
+const MAX_POINTS = 40;
+
+const NODE_COLORS = {
+  'NODE-A': '#00d4ff', 'NODE-B': '#00ff88',
+  'NODE-C': '#9b59ff', 'NODE-D': '#ffb700',
+  'NODE-E': '#ff3366', 'NODE-F': '#ff8c42',
+};
+const STATUS_COLOR = { healthy: '#00ff88', warning: '#ffb700', critical: '#ff3366', offline: '#4a5568' };
+
+// ══════════════════════════════════════════════════════════════
+// CLOCK
+// ══════════════════════════════════════════════════════════════
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ══════════════════════════════════════════════════════════════
+// WEBSOCKET
+// ══════════════════════════════════════════════════════════════
+function connectWS() {
+  const dot = document.getElementById('ws-dot');
+  const lbl = document.getElementById('ws-status');
+  // Always connect to port 8000 backend explicitly
+  const host = location.hostname || 'localhost';
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${proto}://${host}:8000/ws`;
+  console.log('[WS] Connecting to', wsUrl);
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    dot.className = 'ws-dot connected';
+    lbl.textContent = 'LIVE';
+    showToast('WebSocket connected', 'info');
+  };
+  ws.onclose = () => {
+    dot.className = 'ws-dot error';
+    lbl.textContent = 'RECONNECTING';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => { dot.className = 'ws-dot error'; };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'init' || msg.type === 'metrics_update') {
+      handleUpdate(msg);
+    }
+  };
+
+  // keep-alive ping
+  setInterval(() => { if (ws && ws.readyState === 1) ws.send('ping'); }, 15000);
+}
+
+function handleUpdate(msg) {
+  const data  = msg.data || {};
+  const sys   = msg.system || {};
+  const faults = msg.recent_faults || msg.faults || [];
+
+  latestData = data;
+  faultHistory = faults;
+
+  // Header stats
+  let healthy = 0, warning = 0, critical = 0;
+  Object.values(data).forEach(n => {
+    if (n.status === 'healthy') healthy++;
+    else if (n.status === 'warning') warning++;
+    else if (n.status === 'critical' || n.status === 'offline') critical++;
+  });
+  document.getElementById('h-healthy').textContent  = healthy;
+  document.getElementById('h-warning').textContent  = warning;
+  document.getElementById('h-critical').textContent = critical;
+  document.getElementById('h-total').textContent    = sys.total_faults_detected || 0;
+  document.getElementById('h-packets').textContent  = fmtNum(sys.total_packets || 0);
+
+  // Model bar
+  if (sys.model_trained) {
+    const badge = document.getElementById('model-badge');
+    badge.textContent = 'MODEL READY';
+    badge.className = 'model-ready-badge ready';
+  }
+  if (sys.model_accuracy) document.getElementById('m-acc').textContent = sys.model_accuracy + '%';
+  if (sys.uptime_s !== undefined) document.getElementById('m-uptime').textContent = fmtUptime(sys.uptime_s);
+
+  document.getElementById('node-count').textContent = `${healthy + warning} / ${Object.keys(data).length} ONLINE`;
+
+  renderNodes(data, sys.active_faults || {});
+  renderFaultLog(faults);
+  pushChartData(data);
+  updateTopology(data);
+}
+
+function fmtNum(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K';
+  return n.toString();
+}
+function fmtUptime(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+}
+
+// ══════════════════════════════════════════════════════════════
+// NODE CARDS
+// ══════════════════════════════════════════════════════════════
+function renderNodes(data, activeFaults) {
+  const container = document.getElementById('nodes-container');
+  const html = Object.entries(data).map(([nid, n]) => {
+    const m = n.metrics || {};
+    const det = n.detection || {};
+    const fault = activeFaults[nid];
+    const statusClass = n.status || 'healthy';
+    const badgeClass = `badge-${statusClass}`;
+    const statusText = statusClass.toUpperCase();
+
+    const rttColor   = m.rtt_ms > 200 ? 'danger' : m.rtt_ms > 80 ? 'warn' : 'good';
+    const lossColor  = m.packet_loss > 10 ? 'danger' : m.packet_loss > 3 ? 'warn' : 'good';
+    const cpuColor   = m.cpu_pct > 80 ? 'danger' : m.cpu_pct > 60 ? 'warn' : 'good';
+    const memColor   = m.mem_pct > 85 ? 'danger' : m.mem_pct > 70 ? 'warn' : 'good';
+
+    return `<div class="node-card ${statusClass} ${nid===selectedNode?'selected':''}" onclick="selectNode('${nid}')">
+      <div class="node-top">
+        <div class="node-id">${nid}</div>
+        <div class="node-status-badge ${badgeClass}">${statusText}</div>
+      </div>
+      <div class="node-meta">${n.region} · ${n.role?.toUpperCase()}</div>
+      <div class="node-metrics">
+        <div class="nm"><div class="nm-lbl">RTT</div><div class="nm-val ${rttColor}">${(m.rtt_ms||0).toFixed(1)}ms</div></div>
+        <div class="nm"><div class="nm-lbl">LOSS</div><div class="nm-val ${lossColor}">${(m.packet_loss||0).toFixed(1)}%</div></div>
+        <div class="nm"><div class="nm-lbl">CPU</div><div class="nm-val ${cpuColor}">${(m.cpu_pct||0).toFixed(0)}%</div></div>
+        <div class="nm"><div class="nm-lbl">MEM</div><div class="nm-val ${memColor}">${(m.mem_pct||0).toFixed(0)}%</div></div>
+      </div>
+      ${fault ? `<div class="node-fault-tag">FAULT: ${fault.replace(/_/g,' ').toUpperCase()}</div>` : ''}
+    </div>`;
+  }).join('');
+  container.innerHTML = html;
+
+  // Inject nodes grid
+  const grid = document.getElementById('inject-nodes-grid');
+  if (grid) {
+    grid.innerHTML = Object.keys(data).map(nid =>
+      `<div class="inject-node-sel ${nid===injectTarget?'active':''}" onclick="setInjectTarget('${nid}')">${nid}</div>`
+    ).join('') + `<div class="inject-node-sel ${injectTarget==='ALL'?'active':''}" onclick="setInjectTarget('ALL')">ALL</div>`;
+  }
+}
+
+function selectNode(nid) {
+  selectedNode = nid;
+  // Re-render to update selected state
+  if (latestData && Object.keys(latestData).length) {
+    const faults = {};
+    Object.entries(latestData).forEach(([k,v]) => { if (v.fault_injected) faults[k] = v.fault_injected; });
+    renderNodes(latestData, faults);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// FAULT LOG
+// ══════════════════════════════════════════════════════════════
+function renderFaultLog(faults) {
+  const container = document.getElementById('fault-log-container');
+  const noFaults  = document.getElementById('no-faults');
+  document.getElementById('fault-count').textContent = `${faults.length} EVENTS`;
+
+  if (!faults.length) { noFaults.style.display = 'flex'; container.innerHTML = ''; container.appendChild(noFaults); return; }
+  if (noFaults) noFaults.style.display = 'none';
+
+  const confColor = (c) => c > 75 ? '#ff3366' : c > 50 ? '#ffb700' : '#00d4ff';
+  const html = faults.map(f => {
+    const conf = f.confidence || 0;
+    return `<div class="fault-entry">
+      <div class="fe-top">
+        <span class="fe-node">${f.node_id}</span>
+        <span class="fe-time">${f.ts_str}</span>
+      </div>
+      <div class="fe-type">${(f.fault_type||'').replace(/_/g,' ')}</div>
+      <div class="fe-conf">
+        <div class="conf-bar"><div class="conf-fill" style="width:${conf}%;background:${confColor(conf)}"></div></div>
+        <span class="fe-score">${conf}% CONF</span>
+      </div>
+    </div>`;
+  }).join('');
+  container.innerHTML = html;
+}
+
+// ══════════════════════════════════════════════════════════════
+// CHARTS
+// ══════════════════════════════════════════════════════════════
+const CHART_DEFAULTS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  animation: { duration: 0 },
+  plugins: { legend: { display: true, position: 'top', labels: { color: '#94a3b8', font: { family: "'Share Tech Mono'", size: 10 }, boxWidth: 12, padding: 12 } }, tooltip: { backgroundColor: '#111827', borderColor: '#1e2d45', borderWidth: 1, titleFont: { family: "'Share Tech Mono'", size: 11 }, bodyFont: { family: "'Share Tech Mono'", size: 11 }, titleColor: '#00d4ff', bodyColor: '#e2e8f0' } },
+  scales: {
+    x: { grid: { color: 'rgba(30,45,69,0.6)' }, ticks: { color: '#4a5568', font: { family: "'Share Tech Mono'", size: 9 }, maxTicksLimit: 8 } },
+    y: { grid: { color: 'rgba(30,45,69,0.6)' }, ticks: { color: '#4a5568', font: { family: "'Share Tech Mono'", size: 9 } } }
+  }
+};
+
+function makeTimeLabels(n) {
+  const now = Date.now();
+  return Array.from({length: n}, (_, i) => {
+    const d = new Date(now - (n - 1 - i) * 800);
+    return d.toLocaleTimeString('en-GB', { hour12: false });
+  });
+}
+
+function buildCharts() {
+  const nodeIds = Object.keys(NODE_COLORS);
+  const emptyDs = nodeIds.map(nid => ({
+    label: nid, data: Array(MAX_POINTS).fill(null),
+    borderColor: NODE_COLORS[nid], backgroundColor: NODE_COLORS[nid] + '18',
+    borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false,
+  }));
+
+  const labels = makeTimeLabels(MAX_POINTS);
+  nodeIds.forEach(nid => { ['rtt','loss','cpu','score'].forEach(k => { chartData[k][nid] = Array(MAX_POINTS).fill(null); }); });
+
+  const makeChart = (id, label, color) => {
+    const ctx = document.getElementById(id);
+    if (!ctx) return null;
+    return new Chart(ctx, {
+      type: 'line',
+      data: { labels: [...labels], datasets: JSON.parse(JSON.stringify(emptyDs)) },
+      options: { ...CHART_DEFAULTS, scales: { ...CHART_DEFAULTS.scales, y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: label, color: '#4a5568', font: { family: "'Share Tech Mono'", size: 10 } } } } }
+    });
+  };
+
+  charts.rtt   = makeChart('chart-rtt',   'RTT (ms)',          '#00d4ff');
+  charts.loss  = makeChart('chart-loss',  'Packet Loss (%)',   '#ff3366');
+  charts.cpu   = makeChart('chart-cpu',   'CPU (%)',           '#ffb700');
+  charts.score = makeChart('chart-score', 'Anomaly Score',     '#9b59ff');
+}
+
+function pushChartData(data) {
+  Object.entries(data).forEach(([nid, n]) => {
+    const m = n.metrics || {};
+    const d = n.detection || {};
+    if (chartData.rtt[nid])   { chartData.rtt[nid].push(m.rtt_ms||0);           chartData.rtt[nid].shift(); }
+    if (chartData.loss[nid])  { chartData.loss[nid].push(m.packet_loss||0);      chartData.loss[nid].shift(); }
+    if (chartData.cpu[nid])   { chartData.cpu[nid].push(m.cpu_pct||0);           chartData.cpu[nid].shift(); }
+    if (chartData.score[nid]) { chartData.score[nid].push(d.confidence||0);      chartData.score[nid].shift(); }
+  });
+
+  const nowLabel = new Date().toLocaleTimeString('en-GB', { hour12: false });
+  ['rtt','loss','cpu','score'].forEach(key => {
+    const c = charts[key];
+    if (!c) return;
+    c.data.labels.push(nowLabel); c.data.labels.shift();
+    c.data.datasets.forEach(ds => {
+      const nid = ds.label;
+      if (chartData[key][nid]) { ds.data = [...chartData[key][nid]]; }
+    });
+    c.update('none');
+  });
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.chart-tab').forEach((b,i) => {
+    const tabs = ['rtt','loss','cpu','score'];
+    b.classList.toggle('active', tabs[i] === tab);
+  });
+  document.querySelectorAll('.chart-wrap').forEach(w => w.classList.remove('active'));
+  document.getElementById(`tab-${tab}`).classList.add('active');
+}
+
+// ══════════════════════════════════════════════════════════════
+// TOPOLOGY CANVAS
+// ══════════════════════════════════════════════════════════════
+let topoAnim = 0;
+
+const NODE_POSITIONS = {
+  'NODE-A': [0.5,  0.15],
+  'NODE-B': [0.82, 0.35],
+  'NODE-C': [0.75, 0.75],
+  'NODE-D': [0.5,  0.88],
+  'NODE-E': [0.18, 0.75],
+  'NODE-F': [0.15, 0.35],
+};
+const EDGES = [
+  ['NODE-A','NODE-B'],['NODE-A','NODE-F'],['NODE-A','NODE-D'],
+  ['NODE-B','NODE-C'],['NODE-F','NODE-E'],
+  ['NODE-C','NODE-D'],['NODE-E','NODE-D'],
+  ['NODE-B','NODE-D'],['NODE-F','NODE-A'],
+];
+
+let topoRafId = null;
+function updateTopology(data) {
+  const canvas = document.getElementById('topology-canvas');
+  if (!canvas) return;
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width  = rect.width;
+  canvas.height = rect.height - 42; // subtract header
+  drawTopology(canvas, data);
+}
+
+function drawTopology(canvas, data) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  topoAnim = (topoAnim + 1) % 120;
+
+  const pos = (nid) => [NODE_POSITIONS[nid][0]*W, NODE_POSITIONS[nid][1]*H];
+
+  // Draw edges
+  EDGES.forEach(([a, b]) => {
+    if (!data[a] || !data[b]) return;
+    const [x1,y1] = pos(a), [x2,y2] = pos(b);
+    const bothHealthy = data[a].status === 'healthy' && data[b].status === 'healthy';
+    const anyFault    = data[a].status !== 'healthy' || data[b].status !== 'healthy';
+
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.strokeStyle = anyFault ? 'rgba(255,51,102,0.25)' : 'rgba(0,212,255,0.12)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Animated packet dot
+    if (bothHealthy) {
+      const t = ((topoAnim / 120) + (a.charCodeAt(5) * 0.17)) % 1;
+      const px = x1 + (x2-x1)*t, py = y1 + (y2-y1)*t;
+      ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI*2);
+      ctx.fillStyle = '#00d4ff'; ctx.fill();
+    }
+  });
+
+  // Draw nodes
+  Object.entries(NODE_POSITIONS).forEach(([nid, [fx,fy]]) => {
+    const x = fx*W, y = fy*H;
+    const nd = data[nid];
+    if (!nd) return;
+    const sc = STATUS_COLOR[nd.status] || '#4a5568';
+    const isSelected = nid === selectedNode;
+    const pulse = Math.sin((topoAnim / 30) * Math.PI) * 0.5 + 0.5;
+
+    // Glow ring for faulted nodes
+    if (nd.status !== 'healthy') {
+      ctx.beginPath(); ctx.arc(x, y, 22 + pulse*6, 0, Math.PI*2);
+      ctx.strokeStyle = sc + '44'; ctx.lineWidth = 2; ctx.stroke();
+    }
+    // Selection ring
+    if (isSelected) {
+      ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI*2);
+      ctx.strokeStyle = '#00d4ff88'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // Node circle
+    ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI*2);
+    ctx.fillStyle = nd.status === 'offline' ? '#0b0f1a' : sc + '22';
+    ctx.fill();
+    ctx.strokeStyle = sc; ctx.lineWidth = 1.5; ctx.stroke();
+
+    // Label
+    ctx.font = '700 10px "Share Tech Mono"';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = sc; ctx.fillText(nid.replace('NODE-','N'), x, y);
+
+    // Fault badge
+    if (nd.detection && nd.detection.is_fault) {
+      ctx.font = '600 8px "Share Tech Mono"';
+      ctx.fillStyle = '#ff3366';
+      ctx.fillText('⚠ FAULT', x, y + 28);
+    }
+  });
+
+  if (topoRafId) cancelAnimationFrame(topoRafId);
+  topoRafId = requestAnimationFrame(() => drawTopology(canvas, latestData || data));
+}
+
+// Topology hover tooltip
+document.getElementById('topology-canvas').addEventListener('mousemove', function(e) {
+  const rect = this.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const W = rect.width, H = rect.height;
+  const tip = document.getElementById('topo-tooltip');
+  let found = false;
+  Object.entries(NODE_POSITIONS).forEach(([nid, [fx,fy]]) => {
+    const x = fx*W, y = fy*H;
+    if (Math.hypot(mx-x, my-y) < 22) {
+      found = true;
+      const nd = latestData[nid]; if (!nd) return;
+      const m = nd.metrics || {};
+      tip.style.display = 'block';
+      tip.style.left = (e.clientX + 16) + 'px';
+      tip.style.top  = (e.clientY - 10) + 'px';
+      tip.innerHTML = `<b style="color:var(--accent)">${nid}</b> · ${nd.region}<br>
+Status: <b style="color:${STATUS_COLOR[nd.status]}">${nd.status.toUpperCase()}</b><br>
+RTT: ${(m.rtt_ms||0).toFixed(1)}ms &nbsp; Loss: ${(m.packet_loss||0).toFixed(1)}%<br>
+CPU: ${(m.cpu_pct||0).toFixed(0)}% &nbsp; Mem: ${(m.mem_pct||0).toFixed(0)}%`;
+    }
+  });
+  if (!found) tip.style.display = 'none';
+});
+document.getElementById('topology-canvas').addEventListener('mouseleave', () => {
+  document.getElementById('topo-tooltip').style.display = 'none';
+});
+document.getElementById('topology-canvas').addEventListener('click', function(e) {
+  const rect = this.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const W = rect.width, H = rect.height;
+  Object.entries(NODE_POSITIONS).forEach(([nid, [fx,fy]]) => {
+    const x = fx*W, y = fy*H;
+    if (Math.hypot(mx-x, my-y) < 22) { selectNode(nid); setInjectTarget(nid); }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════
+// FAULT INJECTION
+// ══════════════════════════════════════════════════════════════
+function toggleInject() {
+  injectOpen = !injectOpen;
+  document.getElementById('panel-inject').classList.toggle('hidden', !injectOpen);
+  document.getElementById('inject-toggle-lbl').textContent = injectOpen ? '▼ COLLAPSE' : '▲ EXPAND';
+}
+
+function setInjectTarget(nid) {
+  injectTarget = nid;
+  document.querySelectorAll('.inject-node-sel').forEach(el => {
+    el.classList.toggle('active', el.textContent === nid);
+  });
+}
+
+async function injectFault(faultType) {
+  const target = injectTarget;
+  if (!target) { showToast('Select a target node first', 'info'); return; }
+  if (target === 'ALL') { injectAll(faultType); return; }
+
+  const res = await fetch('/api/inject_fault', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ node_id: target, fault_type: faultType })
+  });
+  const json = await res.json();
+  const isClr = faultType === 'clear';
+  showToast(`${isClr ? 'Cleared' : faultType.replace(/_/g,' ')} on ${target}`, isClr ? 'clear' : 'fault');
+}
+
+async function injectAll(faultType) {
+  await fetch('/api/inject_all', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ fault_type: faultType })
+  });
+  showToast(`${faultType.replace(/_/g,' ')} injected on ALL nodes`, 'fault');
+}
+
+async function clearAll() {
+  await fetch('/api/inject_all', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ fault_type: 'clear' })
+  });
+  showToast('All faults cleared', 'clear');
+}
+
+// ══════════════════════════════════════════════════════════════
+// TOAST
+// ══════════════════════════════════════════════════════════════
+function showToast(msg, type = 'info') {
+  const c = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+// ══════════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════════
+window.addEventListener('load', () => {
+  buildCharts();
+  connectWS();
+
+  // Handle resize
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (latestData && Object.keys(latestData).length) updateTopology(latestData);
+    }, 200);
+  });
+});
+</script>
+</body>
+</html>

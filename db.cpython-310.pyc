@@ -1,0 +1,657 @@
+"""
+database/models.py
+==================
+SQLAlchemy ORM models for the AI Network Fault Detection System.
+
+Tables
+------
+  nodes            — registered monitoring nodes
+  metric_logs      — per-node network metric samples
+  fault_events     — detected faults (rule-based or ML-predicted)
+  file_transfers   — file upload records with checksum verification
+
+All timestamps are stored as UTC datetime objects without timezone info
+(``timezone=False``) so that SQLite and PostgreSQL behave identically.
+"""
+
+from __future__ import annotations
+
+import enum
+from datetime import datetime
+from typing import Optional
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from database.db import Base
+
+
+# ---------------------------------------------------------------------------
+# Enumerations (mirrored from fault_detector.py for DB storage)
+# ---------------------------------------------------------------------------
+
+
+class FaultTypeEnum(str, enum.Enum):
+    NORMAL = "NORMAL"
+    HIGH_LATENCY = "HIGH_LATENCY"
+    PACKET_LOSS = "PACKET_LOSS"
+    THROUGHPUT_DEGRADATION = "THROUGHPUT_DEGRADATION"
+    NETWORK_CONGESTION = "NETWORK_CONGESTION"
+    NODE_FAILURE = "NODE_FAILURE"
+    DATA_CORRUPTION = "DATA_CORRUPTION"
+
+
+class SeverityEnum(str, enum.Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    CRITICAL = "CRITICAL"
+
+
+class NodeStatusEnum(str, enum.Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    DEGRADED = "degraded"
+
+
+class DetectionSourceEnum(str, enum.Enum):
+    RULE_ENGINE = "rule_engine"
+    ML_MODEL = "ml_model"
+    HEARTBEAT_MONITOR = "heartbeat_monitor"
+    CHECKSUM_VERIFIER = "checksum_verifier"
+
+
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
+
+
+class Node(Base):
+    """
+    Represents a monitoring agent node that connects to the backend.
+
+    A new row is upserted each time a node sends its first ``hello``
+    WebSocket message.  The ``last_seen`` column is updated on every
+    heartbeat so the dashboard can show connection freshness.
+    """
+
+    __tablename__ = "nodes"
+
+    # ------------------------------------------------------------------
+    # Primary key
+    # ------------------------------------------------------------------
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # ------------------------------------------------------------------
+    # Identity
+    # ------------------------------------------------------------------
+    node_id: Mapped[str] = mapped_column(
+        String(128),
+        unique=True,
+        nullable=False,
+        index=True,
+        comment="Unique identifier supplied by the node (e.g. 'node-machine-1')",
+    )
+    hostname: Mapped[Optional[str]] = mapped_column(
+        String(256),
+        nullable=True,
+        comment="OS hostname reported by the node",
+    )
+    ip_address: Mapped[Optional[str]] = mapped_column(
+        String(45),  # fits IPv4 and IPv6
+        nullable=True,
+        comment="Peer IP address observed by the server",
+    )
+    os_info: Mapped[Optional[str]] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="Operating-system information string (e.g. 'Linux 5.15.0-91')",
+    )
+    tags: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Comma-separated or JSON string of user-defined tags",
+    )
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=NodeStatusEnum.OFFLINE.value,
+        server_default=NodeStatusEnum.OFFLINE.value,
+        comment="Current connectivity status: online | offline | degraded",
+    )
+
+    # ------------------------------------------------------------------
+    # Timestamps
+    # ------------------------------------------------------------------
+    registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        comment="UTC timestamp of first registration",
+    )
+    last_seen: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=False),
+        nullable=True,
+        comment="UTC timestamp of the most recent heartbeat or metric message",
+    )
+
+    # ------------------------------------------------------------------
+    # Relationships
+    # ------------------------------------------------------------------
+    metric_logs: Mapped[list["MetricLog"]] = relationship(
+        "MetricLog",
+        back_populates="node",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+    fault_events: Mapped[list["FaultEvent"]] = relationship(
+        "FaultEvent",
+        back_populates="node",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+    file_transfers: Mapped[list["FileTransfer"]] = relationship(
+        "FileTransfer",
+        back_populates="node",
+        cascade="all, delete-orphan",
+        lazy="select",
+    )
+
+    # ------------------------------------------------------------------
+    # Indexes
+    # ------------------------------------------------------------------
+    __table_args__ = (
+        Index("ix_nodes_status", "status"),
+        Index("ix_nodes_last_seen", "last_seen"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Node id={self.id} node_id={self.node_id!r} "
+            f"status={self.status!r}>"
+        )
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dictionary (safe for JSON responses)."""
+        return {
+            "id": self.id,
+            "node_id": self.node_id,
+            "hostname": self.hostname,
+            "ip_address": self.ip_address,
+            "os_info": self.os_info,
+            "tags": self.tags,
+            "status": self.status,
+            "registered_at": (
+                self.registered_at.isoformat() if self.registered_at else None
+            ),
+            "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# MetricLog
+# ---------------------------------------------------------------------------
+
+
+class MetricLog(Base):
+    """
+    One row per metric sample received from a client node.
+
+    Samples arrive roughly every 3 seconds per node.  The four core
+    network health indicators are stored as plain floats so that SQL
+    aggregation functions (AVG, MAX, MIN) work without casting.
+    """
+
+    __tablename__ = "metric_logs"
+
+    # ------------------------------------------------------------------
+    # Primary key
+    # ------------------------------------------------------------------
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # ------------------------------------------------------------------
+    # Foreign key
+    # ------------------------------------------------------------------
+    node_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("nodes.node_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Network metrics
+    # ------------------------------------------------------------------
+    latency_ms: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        comment="Round-trip latency in milliseconds",
+    )
+    packet_loss_rate: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        comment="Packet loss fraction in [0, 1]  (e.g. 0.05 = 5%)",
+    )
+    throughput_mbps: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        comment="Network throughput in megabits per second",
+    )
+    jitter_ms: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        comment="Packet delay variation (jitter) in milliseconds",
+    )
+
+    # ------------------------------------------------------------------
+    # ML inference snapshot (stored alongside the raw metric)
+    # ------------------------------------------------------------------
+    ml_fault_type: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="ML-predicted fault class for this sample",
+    )
+    ml_confidence: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="ML prediction confidence score in [0, 1]",
+    )
+
+    # ------------------------------------------------------------------
+    # Timestamp
+    # ------------------------------------------------------------------
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        index=True,
+        comment="UTC timestamp when this sample was persisted by the server",
+    )
+
+    # ------------------------------------------------------------------
+    # Relationship
+    # ------------------------------------------------------------------
+    node: Mapped["Node"] = relationship("Node", back_populates="metric_logs")
+
+    # ------------------------------------------------------------------
+    # Indexes — optimise the most common query patterns
+    # ------------------------------------------------------------------
+    __table_args__ = (
+        # Time-range queries per node (charts / time-series endpoint)
+        Index("ix_metric_logs_node_time", "node_id", "recorded_at"),
+        # Network-wide time-range aggregations (summary endpoint)
+        Index("ix_metric_logs_recorded_at", "recorded_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<MetricLog id={self.id} node_id={self.node_id!r} "
+            f"latency={self.latency_ms}ms recorded_at={self.recorded_at}>"
+        )
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dictionary (safe for JSON responses)."""
+        return {
+            "id": self.id,
+            "node_id": self.node_id,
+            "latency_ms": self.latency_ms,
+            "packet_loss_rate": self.packet_loss_rate,
+            "throughput_mbps": self.throughput_mbps,
+            "jitter_ms": self.jitter_ms,
+            "ml_fault_type": self.ml_fault_type,
+            "ml_confidence": self.ml_confidence,
+            "recorded_at": (
+                self.recorded_at.isoformat() if self.recorded_at else None
+            ),
+        }
+
+    def as_feature_vector(self) -> list[float]:
+        """
+        Return the four metric values in the order expected by the ML model:
+        [latency_ms, packet_loss_rate, throughput_mbps, jitter_ms]
+        """
+        return [
+            self.latency_ms,
+            self.packet_loss_rate,
+            self.throughput_mbps,
+            self.jitter_ms,
+        ]
+
+
+# ---------------------------------------------------------------------------
+# FaultEvent
+# ---------------------------------------------------------------------------
+
+
+class FaultEvent(Base):
+    """
+    One row per detected fault, regardless of detection source.
+
+    Sources:
+      - ``rule_engine``         — threshold-based rule fired
+      - ``ml_model``            — ML classifier predicted a non-NORMAL class
+      - ``heartbeat_monitor``   — node heartbeat timeout
+      - ``checksum_verifier``   — file upload SHA-256 mismatch
+    """
+
+    __tablename__ = "fault_events"
+
+    # ------------------------------------------------------------------
+    # Primary key
+    # ------------------------------------------------------------------
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # ------------------------------------------------------------------
+    # Foreign key
+    # ------------------------------------------------------------------
+    node_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("nodes.node_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Fault classification
+    # ------------------------------------------------------------------
+    fault_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+        comment="Fault category: HIGH_LATENCY | PACKET_LOSS | … | NORMAL",
+    )
+    severity: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        index=True,
+        comment="Severity level: LOW | MEDIUM | CRITICAL",
+    )
+    description: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Human-readable description of the detected fault",
+    )
+    source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=DetectionSourceEnum.RULE_ENGINE.value,
+        comment="Detection origin: rule_engine | ml_model | heartbeat_monitor | …",
+    )
+
+    # ------------------------------------------------------------------
+    # Associated metric snapshot (values at the time of the fault)
+    # ------------------------------------------------------------------
+    latency_ms: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="Latency reading that contributed to this fault",
+    )
+    packet_loss_rate: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="Packet loss rate reading at time of fault",
+    )
+    throughput_mbps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="Throughput reading at time of fault",
+    )
+    jitter_ms: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="Jitter reading at time of fault",
+    )
+
+    # ------------------------------------------------------------------
+    # ML prediction details (if ML was used for or alongside this event)
+    # ------------------------------------------------------------------
+    ml_fault_type: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="ML model's predicted fault type at the time of this event",
+    )
+    ml_confidence: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        comment="ML model confidence score [0, 1]",
+    )
+
+    # ------------------------------------------------------------------
+    # Acknowledgement / resolution tracking
+    # ------------------------------------------------------------------
+    acknowledged: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+        comment="True if an operator has acknowledged this alert",
+    )
+    resolved: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+        comment="True if the fault condition has been cleared",
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=False),
+        nullable=True,
+        comment="UTC timestamp when the fault was marked as resolved",
+    )
+
+    # ------------------------------------------------------------------
+    # Timestamp
+    # ------------------------------------------------------------------
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        index=True,
+        comment="UTC timestamp when the fault was detected",
+    )
+
+    # ------------------------------------------------------------------
+    # Relationship
+    # ------------------------------------------------------------------
+    node: Mapped["Node"] = relationship("Node", back_populates="fault_events")
+
+    # ------------------------------------------------------------------
+    # Indexes
+    # ------------------------------------------------------------------
+    __table_args__ = (
+        # Most common dashboard query: alerts per node ordered by time
+        Index("ix_fault_events_node_time", "node_id", "detected_at"),
+        # Filter by severity within a time window
+        Index("ix_fault_events_severity_time", "severity", "detected_at"),
+        # Filter by fault type within a time window
+        Index("ix_fault_events_type_time", "fault_type", "detected_at"),
+        # Unresolved alerts feed
+        Index("ix_fault_events_resolved", "resolved", "detected_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<FaultEvent id={self.id} node_id={self.node_id!r} "
+            f"fault_type={self.fault_type!r} severity={self.severity!r} "
+            f"detected_at={self.detected_at}>"
+        )
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dictionary (safe for JSON responses)."""
+        return {
+            "id": self.id,
+            "node_id": self.node_id,
+            "fault_type": self.fault_type,
+            "severity": self.severity,
+            "description": self.description,
+            "source": self.source,
+            "latency_ms": self.latency_ms,
+            "packet_loss_rate": self.packet_loss_rate,
+            "throughput_mbps": self.throughput_mbps,
+            "jitter_ms": self.jitter_ms,
+            "ml_fault_type": self.ml_fault_type,
+            "ml_confidence": self.ml_confidence,
+            "acknowledged": self.acknowledged,
+            "resolved": self.resolved,
+            "resolved_at": (
+                self.resolved_at.isoformat() if self.resolved_at else None
+            ),
+            "detected_at": (
+                self.detected_at.isoformat() if self.detected_at else None
+            ),
+        }
+
+
+# ---------------------------------------------------------------------------
+# FileTransfer
+# ---------------------------------------------------------------------------
+
+
+class FileTransfer(Base):
+    """
+    Audit record for every file upload received from a node.
+
+    The server computes a SHA-256 checksum of the received bytes and
+    compares it with the checksum reported by the client.  A mismatch
+    indicates potential data corruption in transit and triggers a
+    ``DATA_CORRUPTION`` fault event.
+    """
+
+    __tablename__ = "file_transfers"
+
+    # ------------------------------------------------------------------
+    # Primary key
+    # ------------------------------------------------------------------
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # ------------------------------------------------------------------
+    # Foreign key
+    # ------------------------------------------------------------------
+    node_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("nodes.node_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # ------------------------------------------------------------------
+    # File identity
+    # ------------------------------------------------------------------
+    filename: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+        comment="Original filename as reported by the node",
+    )
+    file_size_bytes: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="File size in bytes",
+    )
+    saved_path: Mapped[Optional[str]] = mapped_column(
+        String(1024),
+        nullable=True,
+        comment="Filesystem path where the file was stored on the server",
+    )
+
+    # ------------------------------------------------------------------
+    # Integrity verification
+    # ------------------------------------------------------------------
+    client_checksum: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="SHA-256 hex digest reported by the uploading node",
+    )
+    server_checksum: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="SHA-256 hex digest computed by the server after receiving the file",
+    )
+    checksum_match: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        comment="True if client_checksum == server_checksum (no data corruption)",
+    )
+
+    # ------------------------------------------------------------------
+    # Transfer status
+    # ------------------------------------------------------------------
+    transfer_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="success",
+        comment="Overall transfer outcome: success | corrupted | failed",
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Error details if the transfer failed or was corrupted",
+    )
+
+    # ------------------------------------------------------------------
+    # Timestamps
+    # ------------------------------------------------------------------
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        index=True,
+        comment="UTC timestamp when the upload was processed by the server",
+    )
+
+    # ------------------------------------------------------------------
+    # Relationship
+    # ------------------------------------------------------------------
+    node: Mapped["Node"] = relationship("Node", back_populates="file_transfers")
+
+    # ------------------------------------------------------------------
+    # Indexes
+    # ------------------------------------------------------------------
+    __table_args__ = (
+        # Find all corrupted transfers quickly
+        Index("ix_file_transfers_checksum_match", "checksum_match", "received_at"),
+        # Audit trail per node
+        Index("ix_file_transfers_node_time", "node_id", "received_at"),
+    )
+
+    def __repr__(self) -> str:
+        status = "OK" if self.checksum_match else "CORRUPTED"
+        return (
+            f"<FileTransfer id={self.id} node_id={self.node_id!r} "
+            f"filename={self.filename!r} [{status}] received_at={self.received_at}>"
+        )
+
+    def to_dict(self) -> dict:
+        """Serialise to a plain dictionary (safe for JSON responses)."""
+        return {
+            "id": self.id,
+            "node_id": self.node_id,
+            "filename": self.filename,
+            "file_size_bytes": self.file_size_bytes,
+            "saved_path": self.saved_path,
+            "client_checksum": self.client_checksum,
+            "server_checksum": self.server_checksum,
+            "checksum_match": self.checksum_match,
+            "transfer_status": self.transfer_status,
+            "error_message": self.error_message,
+            "received_at": (
+                self.received_at.isoformat() if self.received_at else None
+            ),
+        }

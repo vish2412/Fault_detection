@@ -1,0 +1,42 @@
+"""
+database/
+=========
+SQLAlchemy ORM layer for the AI Network Fault Detection System.
+
+Public surface
+--------------
+    from database.db     import init_db, close_db, get_db, AsyncSessionLocal, Base
+    from database.models import Node, MetricLog, FaultEvent, FileTransfer
+"""
+
+from database.db import Base, AsyncSessionLocal, get_db, init_db, close_db, engine
+from database.models import (
+    Node,
+    MetricLog,
+    FaultEvent,
+    FileTransfer,
+    FaultTypeEnum,
+    SeverityEnum,
+    NodeStatusEnum,
+    DetectionSourceEnum,
+)
+
+__all__ = [
+    # Engine / session helpers
+    "Base",
+    "engine",
+    "AsyncSessionLocal",
+    "get_db",
+    "init_db",
+    "close_db",
+    # ORM models
+    "Node",
+    "MetricLog",
+    "FaultEvent",
+    "FileTransfer",
+    # Enumerations
+    "FaultTypeEnum",
+    "SeverityEnum",
+    "NodeStatusEnum",
+    "DetectionSourceEnum",
+]
